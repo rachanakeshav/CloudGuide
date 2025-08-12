@@ -8,6 +8,10 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
+        <akka.version>2.8.8</akka.version>
+        <akka.http.version>10.5.3</akka.http.version>
+        <logback.version>1.2.13</logback.version>
+        <openai.version>3.0.2</openai.version>
         <exec.mainClass>com.cloudguide.cloudguide.Cloudguide</exec.mainClass>
     </properties>
     <dependencies>
@@ -39,6 +43,12 @@
 
         <!-- Logging -->
         <dependency>
+            <groupId>com.typesafe.akka</groupId>
+            <artifactId>akka-slf4j_2.13</artifactId>
+            <version>${akka.version}</version>
+        </dependency>
+
+        <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <version>${logback.version}</version>
@@ -54,17 +64,26 @@
     <build>
         <plugins>
             <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-compiler-plugin</artifactId>
-            <version>3.11.0</version>
-            <configuration>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
                 <release>17</release>
-            </configuration>
+                </configuration>
             </plugin>
             <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-surefire-plugin</artifactId>
-            <version>3.2.5</version>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <mainClass>com.cloudguide.Boot</mainClass>
+                    <classpathScope>runtime</classpathScope>
+                </configuration>
             </plugin>
         </plugins>
     </build>
