@@ -14,6 +14,9 @@ import com.cloudguide.CborSerializable;
 import com.cloudguide.pricing.PricingProvider;
 import com.cloudguide.pricing.PricingModels.*;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.time.Instant;
+
 public class PricingActor {
 
     public interface Command extends CborSerializable {
@@ -32,12 +35,14 @@ public class PricingActor {
 
     private static final class PriceFetched implements Command {
 
+        final PricingQuery query;
         final PricingResult result;
         final ActorRef<PricingResult> replyTo;
 
-        PriceFetched(PricingResult r, ActorRef<PricingResult> to) {
-            this.result = r;
-            this.replyTo = to;
+        PriceFetched(PricingQuery query, PricingResult result, ActorRef<PricingResult> replyTo) {
+            this.query = query;
+            this.result = result;
+            this.replyTo = replyTo;
         }
     }
 
@@ -47,20 +52,32 @@ public class PricingActor {
 
     private final ActorContext<Command> ctx;
     private final PricingProvider provider;
+    private final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
+    private final long ttlSeconds = 600;
 
     private PricingActor(ActorContext<Command> ctx, PricingProvider provider) {
         this.ctx = ctx;
         this.provider = provider;
+    }
 
+    private static final class CacheEntry {
+
+        final PricingResult result;
+        final Instant at;
+
+        CacheEntry(PricingResult result) {
+            this.result = result;
+            this.at = Instant.now();
+        }
     }
 
     private Behavior<Command> behavior() {
         return Behaviors.receive(Command.class
         )
                 .onMessage(QueryPricing.class,
-                         this::onQuery)
+                        this::onQuery)
                 .onMessage(PriceFetched.class,
-                         msg -> {
+                        msg -> {
                             msg.replyTo.tell(msg.result);
 
                             return Behaviors.same();
@@ -74,12 +91,32 @@ public class PricingActor {
             msg.replyTo.tell(new PricingResult(null, 0, "unsupported provider"));
             return Behaviors.same();
         }
+        String key = msg.query.toString();
+        CacheEntry cached = cache.get(key);
+        if (cached != null && Instant.now().isBefore(cached.at.plusSeconds(ttlSeconds))) {
+            msg.replyTo.tell(cached.result);
+            return Behaviors.same();
+        }
         ctx.getLog().info("PricingActor: fetching {}", msg.query);
         ctx.pipeToSelf(
                 provider.fetch(msg.query),
-                (res, err) -> err == null ? new PriceFetched(res, msg.replyTo)
-                        : new PriceFetched(new PricingResult(null, 0, "error: " + err.getMessage()), msg.replyTo)
+                (res, err) -> {
+                    if (err != null) {
+                        String e = "error: " + err.getMessage();
+                        return new PriceFetched(msg.query, new PricingResult(null, 0, e), msg.replyTo);
+                    } else {
+                        return new PriceFetched(msg.query, res, msg.replyTo);
+                    }
+                }
         );
+        return Behaviors.same();
+    }
+
+    private Behavior<Command> onPriceFetched(PriceFetched msg) {
+        if (msg.result != null && msg.result.quote() != null) {
+            cache.put(msg.query.toString(), new CacheEntry(msg.result));
+        }
+        msg.replyTo.tell(msg.result);
         return Behaviors.same();
     }
 }
