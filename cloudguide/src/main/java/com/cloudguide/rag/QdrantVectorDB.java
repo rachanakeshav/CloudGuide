@@ -19,10 +19,6 @@ import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import java.nio.charset.StandardCharsets;
 
-/**
- * Qdrant-backed VectorStore using REST API. Expects a single vector per point
- * and stores text in payload.
- */
 public class QdrantVectorDB implements VectorDB {
 
     private final HttpClient http;
@@ -139,8 +135,6 @@ public class QdrantVectorDB implements VectorDB {
             ObjectNode body = mapper.createObjectNode();
             body.set("points", points);
 
-            System.out.println("UPSERT REQ: " + mapper.writeValueAsString(body));
-
             var req = HttpRequest.newBuilder()
                     .uri(URI.create(base + "/collections/" + collection + "/points?wait=true"))
                     .timeout(timeout)
@@ -149,8 +143,6 @@ public class QdrantVectorDB implements VectorDB {
                     .build();
 
             var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-            System.out.println("UPSERT sending batch size=" + points.size());
-            System.out.println("UPSERT RESP: " + resp.statusCode() + " " + resp.body());
             
             if (resp.statusCode() / 100 != 2) {
                 throw new RuntimeException("Qdrant upsert HTTP " + resp.statusCode() + ": " + resp.body());
@@ -192,7 +184,6 @@ public class QdrantVectorDB implements VectorDB {
                     .build();
 
             var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-            System.out.println("SEARCH RESP: " + resp.statusCode() + " " + resp.body());
             if (resp.statusCode() / 100 != 2) {
                 throw new RuntimeException("Qdrant search HTTP " + resp.statusCode() + ": " + resp.body());
             }

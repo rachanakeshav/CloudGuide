@@ -70,12 +70,6 @@ public class Boot {
                     try {
                         qvs.ensureCollection();
                         db = qvs;
-                        db.upsert(new VectorDB.Doc(
-                                "probe#0",
-                                "probe",
-                                "hello probe",
-                                new float[768]
-                        ));
                         ctx.getLog().info("VectorDB: Qdrant {}:{} collection='{}' dim={} distance={}",
                                 qHost, qPort, coll, dim, dist);
                     } catch (Exception e) {
@@ -91,7 +85,7 @@ public class Boot {
                     ctx.getLog().info("VectorDB: InMemory");
                 }
 
-                ActorRef<LogEnvelope> logger = ctx.spawn(LoggingActor.create(), "logging-actor");
+                ActorRef<LoggingActor.Command> logger = ctx.spawn(LoggingActor.create(), "logging-actor");
 
                 // Pricing
                 var provider = new AzurePricingProvider();
@@ -110,7 +104,6 @@ public class Boot {
 
                 ActorRef<DocumentIngestorActor.Command> ingestor = ctx.spawn(DocumentIngestorActor.create(emb, db), "ingestor");
 
-                // Optional: local sink just to log final answers in console
                 ActorRef<RoutingActor.FinalAnswer> sink
                         = ctx.spawnAnonymous(
                                 Behaviors.<RoutingActor.FinalAnswer>setup(inner
@@ -151,13 +144,18 @@ public class Boot {
 //                                },
 //                                ctx.getExecutionContext()
 //                        );
+//                ctx.getSystem().scheduler().scheduleOnce(
+//                        java.time.Duration.ofSeconds(5),
+//                        () -> ingestor.tell(
+//                                new DocumentIngestorActor.IngestPdf(
+//                                        "aws-pricing", new java.io.File(System.getProperty("user.home") + "/cloudguide_docs/aws_pricing.pdf")
+//                                )
+//                        ),
+//                        ctx.getExecutionContext()
+//                );
                 ctx.getSystem().scheduler().scheduleOnce(
-                        java.time.Duration.ofSeconds(5),
-                        () -> ingestor.tell(
-                                new DocumentIngestorActor.IngestPdf(
-                                        "aws-pricing", new java.io.File(System.getProperty("user.home") + "/cloudguide_docs/aws_pricing.pdf")
-                                )
-                        ),
+                        java.time.Duration.ofSeconds(2),
+                        () -> router.tell(new RoutingActor.UserQuery("u-forward-demo-1", "hello", sink)),
                         ctx.getExecutionContext()
                 );
             }

@@ -20,6 +20,7 @@ import com.cloudguide.pricing.PricingModels.PricingResult;
 
 import java.time.Duration;
 import java.util.concurrent.CompletionStage;
+import java.util.Locale;
 import static akka.actor.typed.javadsl.AskPattern.ask;
 
 import com.cloudguide.actors.LLMGateway;
@@ -29,6 +30,29 @@ public class RoutingActor {
 
     public enum Source {
         PRICING, LLM
+    }
+
+    private enum Plan {
+        PRICING, RETRIEVAL_THEN_LLM, LLM_ONLY
+    }
+
+    private static final class Scratchpad {
+
+        final String userId, text;
+        final Plan plan;
+        final long t0Nanos;
+        final StringBuilder notes = new StringBuilder();
+
+        Scratchpad(String userId, String text, Plan plan) {
+            this.userId = userId;
+            this.text = text;
+            this.plan = plan;
+            this.t0Nanos = System.nanoTime();
+        }
+
+        long ms() {
+            return (System.nanoTime() - t0Nanos) / 1_000_000;
+        }
     }
 
     public interface Command extends CborSerializable {
@@ -61,7 +85,8 @@ public class RoutingActor {
     }
 
     private final ActorRef<com.cloudguide.actors.PricingActor.Command> pricing;
-    private final ActorRef<LogEnvelope> logger;
+    private final ActorRef<LoggingActor.Command> logger;
+    ;
     private final ActorContext<Command> ctx;
     private final ActorRef<LLMGateway.Command> llmGateway;
     private final ActorRef<RetrievalActor.Command> retriever;
@@ -69,7 +94,7 @@ public class RoutingActor {
 
     public static Behavior<Command> create(
             ActorRef<com.cloudguide.actors.PricingActor.Command> pricing,
-            ActorRef<LogEnvelope> logger, ActorRef<LLMGateway.Command> llmGateway, ActorRef<RetrievalActor.Command> retriever) {
+            ActorRef<LoggingActor.Command> logger, ActorRef<LLMGateway.Command> llmGateway, ActorRef<RetrievalActor.Command> retriever) {
         return Behaviors.setup(ctx -> {
             Duration llmTimeout;
             try {
@@ -85,7 +110,7 @@ public class RoutingActor {
 
     private RoutingActor(ActorContext<Command> ctx,
             ActorRef<com.cloudguide.actors.PricingActor.Command> pricing,
-            ActorRef<LogEnvelope> logger, ActorRef<LLMGateway.Command> llmGateway, ActorRef<RetrievalActor.Command> retriever, Duration routerToLlmTimeout) {
+            ActorRef<LoggingActor.Command> logger, ActorRef<LLMGateway.Command> llmGateway, ActorRef<RetrievalActor.Command> retriever, Duration routerToLlmTimeout) {
         this.ctx = ctx;
         this.pricing = pricing;
         this.logger = logger;
@@ -101,74 +126,91 @@ public class RoutingActor {
     }
 
     private Behavior<Command> onUserQuery(UserQuery msg) {
-        logger.tell(new LogEnvelope("user.query", msg.text));
+        final String t = msg.text.trim().toLowerCase(Locale.ROOT);
 
-        String t = msg.text.toLowerCase();
+        // Plan selection
+        final boolean isAsk = t.startsWith("ask:");
+        final boolean looksPricing = t.contains("price") || t.contains("cost") || t.contains("pricing");
+        final Plan plan = looksPricing ? Plan.PRICING : (isAsk ? Plan.RETRIEVAL_THEN_LLM : Plan.LLM_ONLY);
 
-        if (t.startsWith("ask:")) {
-            String question = msg.text.substring(4).trim();
-            retriever.tell(new RetrievalActor.AskWithContext(msg.userId, question, msg.replyTo));
-            return Behaviors.same();
+        Scratchpad sp = new Scratchpad(msg.userId, msg.text, plan);
+        logger.tell(new LoggingActor.LogEnvelope("plan", plan.name() + " ms=" + sp.ms()));
+        logger.tell(new LoggingActor.LogEnvelope("user.query", msg.text));
+
+        if (msg.userId.startsWith("u-forward-demo")) {
+            logger.tell(new LoggingActor.ForwardDemo("preserving original replyTo", msg.replyTo, msg.userId));
         }
 
-        boolean looksPricing = t.contains("price") || t.contains("cost") || t.contains("pricing");
+        switch (plan) {
+            case PRICING: {
+                String region = t.contains("westus2") ? "westus2"
+                        : t.contains("southcentralus") ? "southcentralus"
+                        : t.contains("eastus2") ? "eastus2"
+                        : t.contains("eastus") ? "eastus"
+                        : "westus2";
+                String service = (t.contains("vm") || t.contains("virtual machine")) ? "Virtual Machines"
+                        : (t.contains("storage") ? "Storage" : "Storage");
+                String sku = t.contains("archive grs") ? "Archive GRS"
+                        : t.contains("premium lrs") ? "Premium LRS"
+                        : t.contains("d2as") ? "D2as v5"
+                        : t.contains("d2") ? "D2"
+                        : "D2as v5";
 
-        if (looksPricing) {
-            String region = t.contains("westus2") ? "westus2"
-                    : t.contains("southcentralus") ? "southcentralus"
-                    : t.contains("eastus2") ? "eastus2"
-                    : t.contains("eastus") ? "eastus" : "westus2";
-            String service = (t.contains("vm") || t.contains("virtual machine")) ? "Virtual Machines"
-                    : t.contains("storage") ? "Storage" : "Storage";
-            String sku = t.contains("archive grs") ? "Archive GRS"
-                    : t.contains("premium lrs") ? "Premium LRS"
-                    : t.contains("d2as") ? "D2as v5"
-                    : t.contains("d2") ? "D2" : "D2as v5";
+                PricingQuery pq = new PricingQuery("azure", service, region, sku, "Consumption", "USD");
+                Duration timeout = Duration.ofSeconds(6);
 
-            PricingQuery pq = new PricingQuery("azure", service, region, sku, "Consumption", "USD");
+                CompletionStage<PricingResult> fut
+                        = ask(
+                                pricing,
+                                (ActorRef<PricingResult> replyTo) -> new com.cloudguide.actors.PricingActor.QueryPricing(pq, replyTo),
+                                timeout,
+                                ctx.getSystem().scheduler()
+                        );
 
-            Duration timeout = Duration.ofSeconds(6);
+                fut.whenComplete((res, err) -> {
+                    if (err != null || res == null || res.quote() == null) {
+                        msg.replyTo.tell(new FinalAnswer(msg.userId, "No pricing found (or error).", Source.PRICING));
+                        ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.PRICING, "No pricing found (or error).");
+                    } else {
+                        var q = res.quote();
+                        String snippet = String.format(
+                                "[%s] %s | region=%s | sku=%s | price=%.4f %s (%s)",
+                                q.provider(), q.serviceName(), q.region(), q.skuName(),
+                                q.retailPrice(), q.currencyCode(), q.unitOfMeasure()
+                        );
+                        msg.replyTo.tell(new FinalAnswer(msg.userId, snippet, Source.PRICING));
+                    }
+                    logger.tell(new LoggingActor.LogEnvelope("pricing.done", "ms=" + sp.ms()));
+                });
+                break;
+            }
 
-            CompletionStage<PricingResult> fut
-                    = ask(
-                            pricing,
-                            (ActorRef<PricingResult> replyTo)
-                            -> new com.cloudguide.actors.PricingActor.QueryPricing(pq, replyTo),
-                            timeout,
-                            ctx.getSystem().scheduler()
-                    );
+            case RETRIEVAL_THEN_LLM: {
+                int idx = t.indexOf("ask:");
+                String question = msg.text.substring(idx + 4).trim();
+                logger.tell(new LoggingActor.LogEnvelope("retrieval.start", ""));
+                retriever.tell(new RetrievalActor.AskWithContext(msg.userId, question, msg.replyTo));
+                logger.tell(new LoggingActor.LogEnvelope("retrieval.enqueued", ""));
+                break;
+            }
 
-            fut.whenComplete((res, err) -> {
-                if (err != null || res == null || res.quote() == null) {
-                    msg.replyTo.tell(new FinalAnswer(msg.userId, "No pricing found (or error).", Source.PRICING));
-                    ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.PRICING, "No pricing found (or error).");
-                } else {
-                    var q = res.quote();
-                    String snippet = String.format(
-                            "[%s] %s | region=%s | sku=%s | price=%.4f %s (%s)",
-                            q.provider(), q.serviceName(), q.region(), q.skuName(),
-                            q.retailPrice(), q.currencyCode(), q.unitOfMeasure()
-                    );
-                    msg.replyTo.tell(new FinalAnswer(msg.userId, snippet, Source.PRICING));
-                }
-            });
+            case LLM_ONLY: {
+                CompletionStage<LLMActor.LLMResponse> fut
+                        = ask(
+                                llmGateway,
+                                (ActorRef<LLMActor.LLMResponse> replyTo) -> new LLMGateway.ForwardAskLLM(msg.text, replyTo),
+                                routerToLlmTimeout,
+                                ctx.getSystem().scheduler()
+                        );
 
-        } else {
-            // Ask LLM for non-pricing queries
-            CompletionStage<LLMActor.LLMResponse> fut
-                    = ask(
-                            llmGateway,
-                            (ActorRef<LLMActor.LLMResponse> replyTo)
-                            -> new LLMGateway.ForwardAskLLM(msg.text, replyTo),
-                            routerToLlmTimeout,
-                            ctx.getSystem().scheduler()
-                    );
-
-            fut.whenComplete((res, err) -> {
-                String out = (err != null || res == null) ? "LLM error" : res.text();
-                msg.replyTo.tell(new FinalAnswer(msg.userId, out, Source.LLM));
-                ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.LLM, out);
-            });
+                fut.whenComplete((res, err) -> {
+                    String out = (err != null || res == null) ? "LLM error" : res.text();
+                    msg.replyTo.tell(new FinalAnswer(msg.userId, out, Source.LLM));
+                    logger.tell(new LoggingActor.LogEnvelope("llm.done", "ms=" + sp.ms()));
+                    ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.LLM, out);
+                });
+                break;
+            }
         }
 
         return Behaviors.same();
