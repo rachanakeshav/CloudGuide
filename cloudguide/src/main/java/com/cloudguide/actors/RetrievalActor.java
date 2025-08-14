@@ -87,11 +87,11 @@ public class RetrievalActor {
 
         // knobs from config
         var conf = ctx.getSystem().settings().config().getConfig("cloudguide");
-        int topK = conf.getConfig("rag").getInt("topK");                      
-        int maxChars = conf.getConfig("rag").getInt("max-context-chars");     
+        int topK = conf.getConfig("rag").getInt("topK");
+        int maxChars = conf.getConfig("rag").getInt("max-context-chars");
         java.time.Duration llmTimeout;
         try {
-            var d = conf.getConfig("timeouts").getDuration("router-to-llm");  
+            var d = conf.getConfig("timeouts").getDuration("router-to-llm");
             llmTimeout = java.time.Duration.ofSeconds(d.getSeconds());
         } catch (Exception e) {
             llmTimeout = java.time.Duration.ofSeconds(25);
@@ -105,7 +105,11 @@ public class RetrievalActor {
             context = context.substring(0, Math.max(0, maxChars));
         }
 
-        String prompt = "Use the context to answer concisely. If uncertain, say you are unsure.\n\n" + "Context:\n" + context + "\n\n"
+        String prompt
+                = "You are CloudGuide. Use ONLY the context below to answer. "
+                + "If the answer is not in the context, gently steer back and reply: \"Sorry, that information is not available. Perhaps, rephrase or ask me cloud-related questions.\" "
+                + "Answer in at most 6 sentences.\n\n"
+                + "Context:\n" + context + "\n\n"
                 + "Question: " + w.orig.question;
 
         var fut = akka.actor.typed.javadsl.AskPattern.ask(

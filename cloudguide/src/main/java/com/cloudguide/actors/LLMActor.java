@@ -32,20 +32,51 @@ public class LLMActor {
     public interface Command extends CborSerializable {
     }
 
-    public record AskLLM(String prompt, ActorRef<LLMResponse> replyTo) implements Command {
+    public static final class AskLLM implements Command {
 
+        public final String prompt;
+        public final ActorRef<LLMResponse> replyTo;
+
+        public AskLLM(String p, ActorRef<LLMResponse> r) {
+            this.prompt = p;
+            this.replyTo = r;
+        }
+    }
+
+    public static final class ClassifyTopic implements Command {
+
+        public final String text;
+        public final ActorRef<LLMResponse> replyTo;
+
+        public ClassifyTopic(String t, ActorRef<LLMResponse> r) {
+            this.text = t;
+            this.replyTo = r;
+        }
     }
 
     public record LLMResponse(String text) implements CborSerializable {
 
     }
 
-    private record DoChat(String prompt, ActorRef<LLMResponse> replyTo, int attempt) implements Command {
-
-    }
-
+//    private record DoChat(String prompt, ActorRef<LLMResponse> replyTo, int attempt) implements Command {
+//
+//    }
     // Shared service key
     public static final ServiceKey<Command> SERVICE_KEY = ServiceKey.create(Command.class, "llm-service");
+
+    private static final String SYSTEM_ANSWER_PROMPT
+            = "You are CloudGuide, focused ONLY on cloud topics (AWS, Azure, GCP, cloud pricing, "
+  + "architecture, DevOps/SRE, Kubernetes, serverless, storage, networking). "
+  + "Be concise and practical. If a user asks a non-cloud question, politely decline and steer them back by saying "
+  + "\"Sorry I do not have that information, I can help with cloud topics like AWS/Azure/GCP, pricing, and architecture.\" "
+  + "Do not end sentences abruptly."
+  + "Remember: Do not answer non-cloud related questions";
+
+    private static final String SYSTEM_GATE_PROMPT
+            = "You are a strict classifier for CloudGuide. Respond with only one word: "
+            + "ALLOW if the user question is about cloud computing (AWS, Azure, GCP, cloud pricing, "
+            + "architecture, DevOps/SRE, Kubernetes, serverless, cloud storage, networking). "
+            + "Otherwise respond with DECLINE for non-cloud related questions. No punctuation, no explanations.";
 
     public static Behavior<Command> create() {
         return Behaviors.setup(ctx -> {
@@ -82,188 +113,207 @@ public class LLMActor {
             ctx.getLog().info("LLMActor backend={}", backend);
 
             return Behaviors.receive(Command.class)
-                    .onMessage(AskLLM.class, msg -> {
-                        if ("ollama".equals(backend)) {
-                            // ---- OLLAMA path ----
-                            ObjectNode payload = mapper.createObjectNode();
-                            payload.put("model", olModel);
-                            ArrayNode messages = payload.putArray("messages");
-
-                            ObjectNode sys = mapper.createObjectNode();
-                            sys.put("role", "system");
-                            sys.put("content", "You are CloudGuide, a helpful cloud pricing and architecture assistant. Be concise.");
-                            messages.add(sys);
-
-                            ObjectNode user = mapper.createObjectNode();
-                            user.put("role", "user");
-                            user.put("content", msg.prompt());
-                            messages.add(user);
-
-                            payload.put("stream", false);
-                            var opts = payload.putObject("options");
-                            opts.put("num_predict", 200);
-                            opts.put("temperature", 0.2);
-
-                            String body;
-                            try {
-                                body = mapper.writeValueAsString(payload);
-                            } catch (Exception e) {
-                                msg.replyTo().tell(new LLMResponse("Ollama: payload build error"));
-                                return Behaviors.same();
-                            }
-
-                            HttpRequest req = HttpRequest.newBuilder()
-                                    .uri(URI.create(olEndpoint))
-                                    .timeout(Duration.ofSeconds(90))
-                                    .header("Content-Type", "application/json")
-                                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                                    .build();
-
-                            http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
-                                    .orTimeout(95, java.util.concurrent.TimeUnit.SECONDS)
-                                    .whenComplete((resp, err) -> {
-                                        if (err != null) {
-                                            msg.replyTo().tell(new LLMResponse("Ollama error: " + err.getMessage()
-                                                    + " (is 'ollama serve' running and model '" + olModel + "' pulled?)"));
-                                            return;
-                                        }
-                                        if (resp.statusCode() != 200) {
-                                            msg.replyTo().tell(new LLMResponse("Ollama HTTP " + resp.statusCode()));
-                                            return;
-                                        }
-                                        try {
-                                            JsonNode root = mapper.readTree(resp.body());
-                                            String text = root.path("message").path("content").asText("");
-                                            if (text.isBlank()) {
-                                                text = "Ollama empty response";
-                                            }
-                                            msg.replyTo().tell(new LLMResponse(text));
-                                        } catch (Exception parse) {
-                                            msg.replyTo().tell(new LLMResponse("Ollama parse error"));
-                                        }
-                                    });
-
-                            return Behaviors.same();
-                        } else {
-                            // ---- OPENAI path (with retry/backoff on 429) ----
-                            if (openaiKey == null || openaiKey.isBlank()) {
-                                msg.replyTo().tell(new LLMResponse("LLM not configured (missing OPENAI_API_KEY)"));
-                                return Behaviors.same();
-                            }
-                            ctx.getSelf().tell(new DoChat(msg.prompt(), msg.replyTo(), 1));
-                            return Behaviors.same();
-                        }
-                    })
-                    .onMessage(DoChat.class, msg -> {
-                        // (OpenAI only)
+                    .onMessage(ClassifyTopic.class, msg -> {
                         ObjectNode payload = mapper.createObjectNode();
-                        payload.put("model", oaModel);
-                        ArrayNode messages = payload.putArray("messages");
+                        payload.put("model", olModel);
 
+                        ArrayNode messages = payload.putArray("messages");
                         ObjectNode sys = mapper.createObjectNode();
                         sys.put("role", "system");
-                        sys.put("content", "You are CloudGuide, a helpful cloud pricing and architecture assistant. Be concise.");
+                        sys.put("content", SYSTEM_GATE_PROMPT);
                         messages.add(sys);
 
                         ObjectNode user = mapper.createObjectNode();
                         user.put("role", "user");
-                        user.put("content", msg.prompt());
+                        user.put("content", msg.text);
                         messages.add(user);
 
-                        payload.put("temperature", 0.3);
-
-                        String body;
-                        try {
-                            body = mapper.writeValueAsString(payload);
-                        } catch (Exception e) {
-                            msg.replyTo().tell(new LLMResponse("LLM error (payload build)"));
-                            return Behaviors.same();
-                        }
+                        payload.put("stream", false);
+                        var opts = payload.putObject("options");
+                        opts.put("num_predict", 200);
+                        opts.put("temperature", 0.1);
+                        opts.put("num_ctx", 4096);
 
                         HttpRequest req = HttpRequest.newBuilder()
-                                .uri(URI.create(oaEndpoint))
-                                .timeout(Duration.ofSeconds(15))
-                                .header("Authorization", "Bearer " + openaiKey)
+                                .uri(URI.create(olEndpoint)) // Ollama endpoint
+                                .timeout(Duration.ofSeconds(90))
                                 .header("Content-Type", "application/json")
-                                .POST(HttpRequest.BodyPublishers.ofString(body))
+                                .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
                                 .build();
 
                         http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
-                                .orTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                                .orTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                                 .whenComplete((resp, err) -> {
-                                    if (err != null) {
-                                        msg.replyTo().tell(new LLMResponse("LLM error: " + err.getMessage()));
+                                    if (err != null || resp.statusCode() != 200) {
+                                        // fail-open so users aren’t blocked by flakiness
+                                        msg.replyTo.tell(new LLMResponse("ALLOW"));
                                         return;
                                     }
-
-                                    int sc = resp.statusCode();
-                                    String respBody = resp.body();
-
-                                    if (sc == 200) {
-                                        try {
-                                            JsonNode root = mapper.readTree(respBody);
-                                            String text = root.path("choices").path(0).path("message").path("content").asText("");
-                                            if (text.isBlank()) {
-                                                text = "LLM empty response";
-                                            }
-                                            msg.replyTo().tell(new LLMResponse(text));
-                                        } catch (Exception parse) {
-                                            msg.replyTo().tell(new LLMResponse("LLM parse error"));
-                                        }
-                                        return;
-                                    }
-
-                                    // Try to extract OpenAI error shape
-                                    String errType = "", errMsg = "";
                                     try {
-                                        JsonNode er = mapper.readTree(respBody).path("error");
-                                        errType = er.path("type").asText("");
-                                        errMsg = er.path("message").asText("");
-                                    } catch (Exception ignore) {
-                                    }
-
-                                    if (sc == 429 && msg.attempt() <= (1 + MAX_RETRIES)) {
-                                        long delayMillis = retryDelayMillis(resp, msg.attempt());
-                                        ctx.getLog().warn("LLM 429 ({}). Retrying {}/{} in {} ms",
-                                                errType.isEmpty() ? "rate_limited" : errType, msg.attempt(), (1 + MAX_RETRIES), delayMillis);
-                                        ctx.getSystem().scheduler().scheduleOnce(
-                                                Duration.ofMillis(delayMillis),
-                                                () -> ctx.getSelf().tell(new DoChat(msg.prompt(), msg.replyTo(), msg.attempt() + 1)),
-                                                ctx.getExecutionContext()
-                                        );
-                                        return;
-                                    }
-
-                                    if (sc == 401) {
-                                        msg.replyTo().tell(new LLMResponse("LLM HTTP 401 (check API key)"));
-                                    } else if (sc == 429) {
-                                        String text = "insufficient_quota".equals(errType)
-                                                ? "LLM 429 insufficient_quota (add billing/credits)"
-                                                : "LLM HTTP 429 (rate limited)";
-                                        msg.replyTo().tell(new LLMResponse(text));
-                                    } else {
-                                        String text = "LLM HTTP " + sc + (errMsg.isEmpty() ? "" : (": " + errMsg));
-                                        msg.replyTo().tell(new LLMResponse(text));
+                                        // Ollama response: { "message": { "role":"assistant","content":"..." }, ... }
+                                        String raw = mapper.readTree(resp.body())
+                                                .path("message").path("content").asText("").trim();
+                                        String decision = "ALLOW";
+                                        if ("DECLINE".equalsIgnoreCase(raw)) {
+                                            decision = "DECLINE";
+                                        } else if ("ALLOW".equalsIgnoreCase(raw)) {
+                                            decision = "ALLOW";
+                                        } else {
+                                            decision = raw.toUpperCase().contains("DECLINE") ? "DECLINE" : "ALLOW";
+                                        }
+                                        msg.replyTo.tell(new LLMResponse(decision));
+                                    } catch (Exception e) {
+                                        msg.replyTo.tell(new LLMResponse("ALLOW"));
                                     }
                                 });
 
                         return Behaviors.same();
                     })
+                    .onMessage(AskLLM.class, msg -> {
+                        ObjectNode payload = mapper.createObjectNode();
+                        payload.put("model", olModel);
+
+                        ArrayNode messages = payload.putArray("messages");
+                        ObjectNode sys = mapper.createObjectNode();
+                        sys.put("role", "system");
+                        sys.put("content", SYSTEM_ANSWER_PROMPT);
+                        messages.add(sys);
+
+                        ObjectNode user = mapper.createObjectNode();
+                        user.put("role", "user");
+                        user.put("content", msg.prompt);
+                        messages.add(user);
+
+                        payload.put("stream", false);
+                        var opts = payload.putObject("options");
+                        opts.put("num_predict", 200);
+                        opts.put("temperature", 0.2);
+                        opts.put("num_ctx", 4096);
+
+                        HttpRequest req = HttpRequest.newBuilder()
+                                .uri(URI.create(olEndpoint)) // Ollama endpoint
+                                .timeout(Duration.ofSeconds(120))
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+                                .build();
+
+                        http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+                                .orTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                                .whenComplete((resp, err) -> {
+                                    if (err != null) {
+                                        msg.replyTo.tell(new LLMResponse("LLM error: " + err.getMessage()));
+                                        return;
+                                    }
+                                    if (resp.statusCode() != 200) {
+                                        msg.replyTo.tell(new LLMResponse("LLM HTTP " + resp.statusCode()));
+                                        return;
+                                    }
+                                    try {
+                                        String text = mapper.readTree(resp.body())
+                                                .path("message").path("content").asText("");
+                                        msg.replyTo.tell(new LLMResponse(text.isBlank() ? "LLM empty response" : text));
+                                    } catch (Exception e) {
+                                        msg.replyTo.tell(new LLMResponse("LLM parse error"));
+                                    }
+                                });
+
+                        return Behaviors.same();
+                    })
+                    //                    .onMessage(DoChat.class, msg -> {
+                    //                        ObjectNode payload = mapper.createObjectNode();
+                    //                        payload.put("model", oaModel);
+                    //                        ArrayNode messages = payload.putArray("messages");
+                    //
+                    //                        ObjectNode sys = mapper.createObjectNode();
+                    //                        sys.put("role", "system");
+                    //                        sys.put("content", SYSTEM_GATE_PROMPT);
+                    //                        messages.add(sys);
+                    //
+                    //                        ObjectNode user = mapper.createObjectNode();
+                    //                        user.put("role", "user");
+                    //                        user.put("content", msg.prompt());
+                    //                        messages.add(user);
+                    //
+                    //                        payload.put("temperature", 0.3);
+                    //
+                    //                        String body;
+                    //                        try {
+                    //                            body = mapper.writeValueAsString(payload);
+                    //                        } catch (Exception e) {
+                    //                            msg.replyTo().tell(new LLMResponse("LLM error (payload build)"));
+                    //                            return Behaviors.same();
+                    //                        }
+                    //
+                    //                        HttpRequest req = HttpRequest.newBuilder()
+                    //                                .uri(URI.create(oaEndpoint))
+                    //                                .timeout(Duration.ofSeconds(15))
+                    //                                .header("Authorization", "Bearer " + openaiKey)
+                    //                                .header("Content-Type", "application/json")
+                    //                                .POST(HttpRequest.BodyPublishers.ofString(body))
+                    //                                .build();
+                    //
+                    //                        http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+                    //                                .orTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                    //                                .whenComplete((resp, err) -> {
+                    //                                    if (err != null) {
+                    //                                        msg.replyTo().tell(new LLMResponse("LLM error: " + err.getMessage()));
+                    //                                        return;
+                    //                                    }
+                    //
+                    //                                    int sc = resp.statusCode();
+                    //                                    String respBody = resp.body();
+                    //
+                    //                                    if (sc == 200) {
+                    //                                        try {
+                    //                                            JsonNode root = mapper.readTree(respBody);
+                    //                                            String text = root.path("choices").path(0).path("message").path("content").asText("");
+                    //                                            if (text.isBlank()) {
+                    //                                                text = "LLM empty response";
+                    //                                            }
+                    //                                            msg.replyTo().tell(new LLMResponse(text));
+                    //                                        } catch (Exception parse) {
+                    //                                            msg.replyTo().tell(new LLMResponse("LLM parse error"));
+                    //                                        }
+                    //                                        return;
+                    //                                    }
+                    //
+                    //                                    // Try to extract OpenAI error shape
+                    //                                    String errType = "", errMsg = "";
+                    //                                    try {
+                    //                                        JsonNode er = mapper.readTree(respBody).path("error");
+                    //                                        errType = er.path("type").asText("");
+                    //                                        errMsg = er.path("message").asText("");
+                    //                                    } catch (Exception ignore) {
+                    //                                    }
+                    //
+                    //                                    if (sc == 429 && msg.attempt() <= (1 + MAX_RETRIES)) {
+                    //                                        long delayMillis = retryDelayMillis(resp, msg.attempt());
+                    //                                        ctx.getLog().warn("LLM 429 ({}). Retrying {}/{} in {} ms",
+                    //                                                errType.isEmpty() ? "rate_limited" : errType, msg.attempt(), (1 + MAX_RETRIES), delayMillis);
+                    //                                        ctx.getSystem().scheduler().scheduleOnce(
+                    //                                                Duration.ofMillis(delayMillis),
+                    //                                                () -> ctx.getSelf().tell(new DoChat(msg.prompt(), msg.replyTo(), msg.attempt() + 1)),
+                    //                                                ctx.getExecutionContext()
+                    //                                        );
+                    //                                        return;
+                    //                                    }
+                    //
+                    //                                    if (sc == 401) {
+                    //                                        msg.replyTo().tell(new LLMResponse("LLM HTTP 401 (check API key)"));
+                    //                                    } else if (sc == 429) {
+                    //                                        String text = "insufficient_quota".equals(errType)
+                    //                                                ? "LLM 429 insufficient_quota (add billing/credits)"
+                    //                                                : "LLM HTTP 429 (rate limited)";
+                    //                                        msg.replyTo().tell(new LLMResponse(text));
+                    //                                    } else {
+                    //                                        String text = "LLM HTTP " + sc + (errMsg.isEmpty() ? "" : (": " + errMsg));
+                    //                                        msg.replyTo().tell(new LLMResponse(text));
+                    //                                    }
+                    //                                });
+                    //
+                    //                        return Behaviors.same();
+                    //                    })
                     .build();
         });
-    }
-
-    private static long retryDelayMillis(HttpResponse<String> resp, int attempt) {
-        var ra = resp.headers().firstValue("Retry-After");
-        if (ra.isPresent()) {
-            try {
-                long secs = Long.parseLong(ra.get().trim());
-                return Math.max(250L, secs * 1000L);
-            } catch (NumberFormatException ignore) {
-            }
-        }
-        long base = 500L;
-        long delay = base * (1L << Math.max(0, attempt - 1));
-        return Math.min(delay, 4000L);
     }
 }

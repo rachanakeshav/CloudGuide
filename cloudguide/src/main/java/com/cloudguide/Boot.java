@@ -153,11 +153,11 @@ public class Boot {
 //                        ),
 //                        ctx.getExecutionContext()
 //                );
-                ctx.getSystem().scheduler().scheduleOnce(
-                        java.time.Duration.ofSeconds(2),
-                        () -> router.tell(new RoutingActor.UserQuery("u-forward-demo-1", "hello", sink)),
-                        ctx.getExecutionContext()
-                );
+//                ctx.getSystem().scheduler().scheduleOnce(
+//                        java.time.Duration.ofSeconds(2),
+//                        () -> router.tell(new RoutingActor.UserQuery("u-forward-demo-1", "hello", sink)),
+//                        ctx.getExecutionContext()
+//                );
             }
 
             return Behaviors.empty();

@@ -21,17 +21,6 @@ public class LLMGateway {
     public interface Command extends CborSerializable {
     }
 
-    public static final class ForwardAskLLM implements Command {
-
-        public final String prompt;
-        public final ActorRef<LLMActor.LLMResponse> replyTo;
-
-        public ForwardAskLLM(String prompt, ActorRef<LLMActor.LLMResponse> replyTo) {
-            this.prompt = prompt;
-            this.replyTo = replyTo;
-        }
-    }
-
     private static final class ListingUpdated implements Command {
 
         final Receptionist.Listing listing;
@@ -71,6 +60,28 @@ public class LLMGateway {
         this.ctx = ctx;
     }
 
+    public static final class ForwardAskLLM implements Command {
+
+        public final String prompt;
+        public final ActorRef<LLMActor.LLMResponse> replyTo;
+
+        public ForwardAskLLM(String p, ActorRef<LLMActor.LLMResponse> r) {
+            this.prompt = p;
+            this.replyTo = r;
+        }
+    }
+
+    public static final class ForwardClassifyLLM implements Command {
+
+        public final String text;
+        public final ActorRef<LLMActor.LLMResponse> replyTo;
+
+        public ForwardClassifyLLM(String t, ActorRef<LLMActor.LLMResponse> r) {
+            this.text = t;
+            this.replyTo = r;
+        }
+    }
+
     private static Behavior<Command> active(
             ActorContext<Command> ctx,
             ActorRef<LLMActor.Command> current,
@@ -105,6 +116,19 @@ public class LLMGateway {
                         }
                     } else {
                         current.tell(new LLMActor.AskLLM(f.prompt, f.replyTo));
+                    }
+                    return Behaviors.same();
+                })
+                .onMessage(ForwardClassifyLLM.class, f -> {
+                    if (current == null) {
+                        if (backlog.size() < MAX_BACKLOG) {
+                            backlog.add(new Pending("CLASSIFY:" + f.text, f.replyTo)); // simple reuse
+                            ctx.getLog().info("LLMGateway: buffering classify ({} queued)", backlog.size());
+                        } else {
+                            f.replyTo.tell(new LLMActor.LLMResponse("ALLOW")); // fail-open
+                        }
+                    } else {
+                        current.tell(new LLMActor.ClassifyTopic(f.text, f.replyTo));
                     }
                     return Behaviors.same();
                 })

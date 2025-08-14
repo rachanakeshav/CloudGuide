@@ -13,6 +13,7 @@ import akka.actor.typed.ActorSystem;
 import akka.http.javadsl.Http;
 import akka.http.javadsl.ServerBinding;
 import akka.http.javadsl.model.HttpResponse;
+import akka.http.javadsl.model.headers.RawHeader;
 import akka.http.javadsl.model.HttpHeader;
 import akka.http.javadsl.model.headers.RawHeader;
 import akka.http.javadsl.server.AllDirectives;
@@ -25,6 +26,8 @@ import java.util.concurrent.CompletionStage;
 import akka.http.javadsl.unmarshalling.Unmarshaller;
 
 import static akka.actor.typed.javadsl.AskPattern.ask;
+import akka.http.javadsl.model.ContentTypes;
+import akka.http.javadsl.model.HttpEntities;
 
 public class HttpServer extends AllDirectives {
 
@@ -68,7 +71,19 @@ public class HttpServer extends AllDirectives {
                     // 3) Map to JSON string for the HTTP response
                     CompletionStage<String> payload = fut.thenApply(ans -> json(ans.text, ans.source.name()));
 
-                    return respondWithHeaders(corsHeaders(), () -> completeOKWithFutureString(payload));
+                    return onSuccess(fut, ans -> {
+                        java.util.List<HttpHeader> headers = java.util.List.of(
+                                RawHeader.create("Access-Control-Allow-Origin", "*"),
+                                RawHeader.create("Access-Control-Allow-Methods", "GET,POST,OPTIONS"),
+                                RawHeader.create("Access-Control-Allow-Headers", "Content-Type"),
+                                RawHeader.create("X-Source", ans.source.name()) // put source in header
+                        );
+
+                        return respondWithHeaders(
+                                headers,
+                                () -> complete(HttpEntities.create(ContentTypes.TEXT_PLAIN_UTF8, ans.text))
+                        );
+                    });
                 })
                 ),
                 post(()
@@ -92,7 +107,19 @@ public class HttpServer extends AllDirectives {
                     });
 
                     CompletionStage<String> payload = fut.thenApply(ans -> json(ans.text, ans.source.name()));
-                    return respondWithHeaders(corsHeaders(), () -> completeOKWithFutureString(payload));
+                    return onSuccess(fut, ans -> {
+                        java.util.List<HttpHeader> headers = java.util.List.of(
+                                RawHeader.create("Access-Control-Allow-Origin", "*"),
+                                RawHeader.create("Access-Control-Allow-Methods", "GET,POST,OPTIONS"),
+                                RawHeader.create("Access-Control-Allow-Headers", "Content-Type"),
+                                RawHeader.create("X-Source", ans.source.name()) // put source in header
+                        );
+
+                        return respondWithHeaders(
+                                headers,
+                                () -> complete(HttpEntities.create(ContentTypes.TEXT_PLAIN_UTF8, ans.text))
+                        );
+                    });
                 })
                 ),
                 // Simple CORS preflight

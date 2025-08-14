@@ -86,7 +86,6 @@ public class RoutingActor {
 
     private final ActorRef<com.cloudguide.actors.PricingActor.Command> pricing;
     private final ActorRef<LoggingActor.Command> logger;
-    ;
     private final ActorContext<Command> ctx;
     private final ActorRef<LLMGateway.Command> llmGateway;
     private final ActorRef<RetrievalActor.Command> retriever;
@@ -130,17 +129,16 @@ public class RoutingActor {
 
         // Plan selection
         final boolean isAsk = t.startsWith("ask:");
-        final boolean looksPricing = t.contains("price") || t.contains("cost") || t.contains("pricing");
+        final boolean looksPricing = t.contains("price") || t.contains("cost");
         final Plan plan = looksPricing ? Plan.PRICING : (isAsk ? Plan.RETRIEVAL_THEN_LLM : Plan.LLM_ONLY);
 
         Scratchpad sp = new Scratchpad(msg.userId, msg.text, plan);
         logger.tell(new LoggingActor.LogEnvelope("plan", plan.name() + " ms=" + sp.ms()));
         logger.tell(new LoggingActor.LogEnvelope("user.query", msg.text));
 
-        if (msg.userId.startsWith("u-forward-demo")) {
-            logger.tell(new LoggingActor.ForwardDemo("preserving original replyTo", msg.replyTo, msg.userId));
-        }
-
+//        if (msg.userId.startsWith("u-forward-demo")) {
+//            logger.tell(new LoggingActor.ForwardDemo("preserving original replyTo", msg.replyTo, msg.userId));
+//        }
         switch (plan) {
             case PRICING: {
                 String region = t.contains("westus2") ? "westus2"
@@ -195,24 +193,48 @@ public class RoutingActor {
             }
 
             case LLM_ONLY: {
-                CompletionStage<LLMActor.LLMResponse> fut
+                // 1) Classify with a short timeout
+                CompletionStage<LLMActor.LLMResponse> gate
                         = ask(
                                 llmGateway,
-                                (ActorRef<LLMActor.LLMResponse> replyTo) -> new LLMGateway.ForwardAskLLM(msg.text, replyTo),
-                                routerToLlmTimeout,
+                                (ActorRef<LLMActor.LLMResponse> r) -> new LLMGateway.ForwardClassifyLLM(msg.text, r),
+                                Duration.ofSeconds(4),
                                 ctx.getSystem().scheduler()
                         );
 
-                fut.whenComplete((res, err) -> {
-                    String out = (err != null || res == null) ? "LLM error" : res.text();
-                    msg.replyTo.tell(new FinalAnswer(msg.userId, out, Source.LLM));
-                    logger.tell(new LoggingActor.LogEnvelope("llm.done", "ms=" + sp.ms()));
-                    ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.LLM, out);
+                gate.whenComplete((g, ge) -> {
+                    boolean allow = (ge == null && g != null && "ALLOW".equalsIgnoreCase(g.text()));
+                    if (!allow) {
+                        String redirect
+                                = "I focus on cloud topics (AWS, Azure, GCP, pricing, architecture, DevOps/SRE). "
+                                + "Ask me about cloud and I’ll help right away!";
+                        msg.replyTo.tell(new FinalAnswer(msg.userId, redirect, Source.LLM));
+                        logger.tell(new LoggingActor.LogEnvelope("llm.gate", "DECLINE ms=" + sp.ms()));
+                        return;
+                    }
+
+                    // 2) Allowed → do the normal LLM call
+                    CompletionStage<LLMActor.LLMResponse> fut
+                            = ask(
+                                    llmGateway,
+                                    (ActorRef<LLMActor.LLMResponse> r) -> new LLMGateway.ForwardAskLLM(msg.text, r),
+                                    routerToLlmTimeout,
+                                    ctx.getSystem().scheduler()
+                            );
+
+                    fut.whenComplete((res, err) -> {
+                        String out = (err != null || res == null) ? "LLM error" : res.text();
+                        msg.replyTo.tell(new FinalAnswer(msg.userId, out, Source.LLM));
+                        logger.tell(new LoggingActor.LogEnvelope("llm.done", "ms=" + sp.ms()));
+                        ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.LLM, out);
+                    });
                 });
+
                 break;
             }
         }
 
         return Behaviors.same();
     }
+
 }
