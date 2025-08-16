@@ -102,15 +102,24 @@ public class RetrievalActor {
                 .map(h -> "- " + h.text())
                 .collect(java.util.stream.Collectors.joining("\n"));
         if (context.length() > maxChars) {
-            context = context.substring(0, Math.max(0, maxChars));
+            int cut = context.lastIndexOf("\n---\n", maxChars);
+            context = context.substring(0, cut > 0 ? cut : maxChars);
         }
 
-        String prompt
-                = "You are CloudGuide. Use ONLY the context below to answer. "
-                + "If the answer is not in the context, gently steer back and reply: \"Sorry, that information is not available. Perhaps, rephrase or ask me cloud-related questions.\" "
-                + "Answer in at most 6 sentences.\n\n"
-                + "Context:\n" + context + "\n\n"
-                + "Question: " + w.orig.question;
+        String contextHeader = "You are CloudGuide answering ONLY from the provided context.\n"
+                + "Rules:\n"
+                + "1) Use ONLY the context below. Do NOT add outside knowledge.\n"
+                + "2) If the answer is not in the context, say: \"Sorry, that information is not available in our data store. I can help with other cloud related questions\" and stop.\n"
+                + "3) Stay concise. No vendor detours unless the context mentions it.\n\n";
+
+        String labeled = hits.stream()
+                .map(h -> "DOC=" + h.docId() + " :: " + h.text())
+                .collect(Collectors.joining("\n---\n"));
+
+        String prompt = contextHeader
+                + "Context:\n" + labeled + "\n\n"
+                + "Question: " + w.orig.question + "\n"
+                + "Answer:";
 
         var fut = akka.actor.typed.javadsl.AskPattern.ask(
                 gateway,

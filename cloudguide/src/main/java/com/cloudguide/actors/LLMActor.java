@@ -187,7 +187,7 @@ public class LLMActor {
                         payload.put("stream", false);
                         var opts = payload.putObject("options");
                         opts.put("num_predict", 200);
-                        opts.put("temperature", 0.2);
+                        opts.put("temperature", 0.1);
                         opts.put("num_ctx", 4096);
 
                         HttpRequest req = HttpRequest.newBuilder()

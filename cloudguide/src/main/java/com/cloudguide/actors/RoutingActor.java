@@ -55,6 +55,23 @@ public class RoutingActor {
         }
     }
 
+    private static final String[] AZURE_REGIONS = {
+        "eastus", "eastus2", "westus", "westus2", "westus3",
+        "centralus", "northcentralus", "southcentralus",
+        "westcentralus",
+        "canadacentral", "canadaeast",
+        "brazilsouth", "brazilsoutheast",
+        "northeurope", "westeurope", "swedencentral",
+        "uksouth", "ukwest", "francecentral", "germanywestcentral",
+        "switzerlandnorth", "norwayeast",
+        "eastasia", "southeastasia", "japaneast", "japanwest",
+        "australiaeast", "australiasoutheast", "australiacentral",
+        "koreacentral", "koreasouth",
+        "southindia", "centralindia", "westindia",
+        "uaenorth", "israelcentral", "qatarcentral",
+        "southafricanorth"
+    };
+
     public interface Command extends CborSerializable {
     }
 
@@ -124,6 +141,105 @@ public class RoutingActor {
                 .build();
     }
 
+    private static String norm(String s) {
+        return s.toLowerCase(Locale.ROOT).replaceAll("[\\s_\\-]+", "");
+    }
+
+// Try to detect provider (simple heuristic)
+    private static String detectProvider(String t) {
+        String n = norm(t);
+        if (n.contains("aws") || n.contains("amazon")) {
+            return "aws";
+        }
+        if (n.contains("gcp") || n.contains("googlecloud")) {
+            return "gcp";
+        }
+        return "azure"; // default
+    }
+
+    private static String pickAzureRegion(String t, String fallback) {
+        String n = norm(t);
+        for (String r : AZURE_REGIONS) {
+            if (n.contains(norm(r))) {
+                return r;
+            }
+        }
+        return fallback;
+    }
+
+    private static String detectService(String t) {
+        String n = t.toLowerCase(Locale.ROOT);
+        if (n.contains("vm") || n.contains("virtual machine") || n.contains("virtual machines") || n.contains("compute")) {
+            return "Virtual Machines";
+        }
+        if (n.contains("storage") || n.contains("blob")) {
+            return "Storage";
+        }
+        if (n.contains("cache")) {
+            return "Redis Cache";
+        }
+        if (n.contains("analytics")) {
+            return "Azure Synapse Analytics";
+        }
+        if (n.contains("db") || n.contains("database")) {
+            return "Azure Database for MySQL";
+        }
+        return "Virtual Machines";
+    }
+
+    private static String parseVmSku(String t) {
+        // Examples: normalize: d2as v5, D2as_v5, B2s, D4s v5, E2 v3, etc.
+        var m1 = java.util.regex.Pattern
+                .compile("\\b([bdefgilmnprstuvxz])(\\d{1,2})([a-z]{0,3})\\s*[_\\- ]?v\\s*(\\d)\\b", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(t);
+        if (m1.find()) {
+            String family = m1.group(1).toUpperCase(Locale.ROOT);
+            String size = m1.group(2);
+            String suffix = m1.group(3) == null ? "" : m1.group(3).toLowerCase(Locale.ROOT);
+            String ver = m1.group(4);
+            String suf = suffix.isBlank() ? "" : suffix;
+            // e.g., D2as v5
+            return family + size + suf + " v" + ver;
+        }
+        // Simpler shape: B2s, D2s, E4a, F8 etc.
+        var m2 = java.util.regex.Pattern
+                .compile("\\b([bdefgilmnprstuvxz])(\\d{1,2})([a-z])\\b", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(t);
+        if (m2.find()) {
+            String family = m2.group(1).toUpperCase(Locale.ROOT);
+            String size = m2.group(2);
+            String suffix = m2.group(3).toLowerCase(Locale.ROOT);
+            return family + size + suffix;
+        }
+        return null;
+    }
+
+    private static String parseStorageSku(String t) {
+        String n = t.toLowerCase(Locale.ROOT);
+        if (n.contains("archive") && n.contains("grs")) {
+            return "Archive GRS";
+        }
+        if (n.contains("archive") && n.contains("lrs")) {
+            return "Archive LRS";
+        }
+        if (n.contains("premium") && n.contains("lrs")) {
+            return "Premium LRS";
+        }
+        if (n.contains("cool") && n.contains("lrs")) {
+            return "Cool LRS";
+        }
+        if (n.contains("hot") && n.contains("lrs")) {
+            return "Hot LRS";
+        }
+        if (n.contains("grs")) {
+            return "GRS";
+        }
+        if (n.contains("lrs")) {
+            return "LRS";
+        }
+        return "Standard LRS";
+    }
+
     private Behavior<Command> onUserQuery(UserQuery msg) {
         final String t = msg.text.trim().toLowerCase(Locale.ROOT);
 
@@ -141,34 +257,60 @@ public class RoutingActor {
 //        }
         switch (plan) {
             case PRICING: {
-                String region = t.contains("westus2") ? "westus2"
-                        : t.contains("southcentralus") ? "southcentralus"
-                        : t.contains("eastus2") ? "eastus2"
-                        : t.contains("eastus") ? "eastus"
-                        : "westus2";
-                String service = (t.contains("vm") || t.contains("virtual machine")) ? "Virtual Machines"
-                        : (t.contains("storage") ? "Storage" : "Storage");
-                String sku = t.contains("archive grs") ? "Archive GRS"
-                        : t.contains("premium lrs") ? "Premium LRS"
-                        : t.contains("d2as") ? "D2as v5"
-                        : t.contains("d2") ? "D2"
-                        : "D2as v5";
+                // 1) decide provider (default azure)
+                String provider = detectProvider(t);
 
-                PricingQuery pq = new PricingQuery("azure", service, region, sku, "Consumption", "USD");
+                // 2) choose service
+                String service = detectService(t);
+
+                // 3) region (per provider; we only wired Azure list here)
+                String region;
+                if ("azure".equals(provider)) {
+                    region = pickAzureRegion(t, "eastus"); // eastus as safe default
+                } else {
+                    // TODO: add AWS/GCP region pickers if you enable those providers
+                    region = "us-east-1"; // safe default for non-azure, if you wire later
+                }
+
+                // 4) SKU guess
+                String skuVal;
+                if ("Virtual Machines".equals(service)) {
+                    skuVal = parseVmSku(t);
+                    if (skuVal == null) {
+                        skuVal = "D2as v5"; // fallback VM size
+                    }
+                } else if ("Storage".equals(service)) {
+                    skuVal = parseStorageSku(t);
+                } else {
+                    skuVal = "general";
+                }
+                final String sku = skuVal;
+
+                // 5) build pricing query (you can later route by provider to different providers)
+                PricingQuery pq = new PricingQuery(
+                        provider, // "azure" | "aws" | "gcp"
+                        service, // e.g., "Virtual Machines"
+                        region, // e.g., "eastasia"
+                        sku, // e.g., "D2as v5"
+                        "Consumption", // price type
+                        "USD" // currency
+                );
+
                 Duration timeout = Duration.ofSeconds(6);
 
-                CompletionStage<PricingResult> fut
-                        = ask(
-                                pricing,
-                                (ActorRef<PricingResult> replyTo) -> new com.cloudguide.actors.PricingActor.QueryPricing(pq, replyTo),
-                                timeout,
-                                ctx.getSystem().scheduler()
-                        );
+                CompletionStage<PricingResult> fut = ask(
+                        pricing,
+                        (ActorRef<PricingResult> replyTo) -> new com.cloudguide.actors.PricingActor.QueryPricing(pq, replyTo),
+                        timeout,
+                        ctx.getSystem().scheduler()
+                );
 
                 fut.whenComplete((res, err) -> {
                     if (err != null || res == null || res.quote() == null) {
-                        msg.replyTo.tell(new FinalAnswer(msg.userId, "No pricing found (or error).", Source.PRICING));
-                        ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.PRICING, "No pricing found (or error).");
+                        msg.replyTo.tell(new FinalAnswer(msg.userId,
+                                "No pricing found for " + provider + " " + service + " in " + region + " (sku=" + sku + ").",
+                                Source.PRICING));
+                        ctx.getLog().info("FINAL ANSWER ({} | {}): {}", msg.userId, Source.PRICING, "No pricing found.");
                     } else {
                         var q = res.quote();
                         String snippet = String.format(
@@ -178,7 +320,9 @@ public class RoutingActor {
                         );
                         msg.replyTo.tell(new FinalAnswer(msg.userId, snippet, Source.PRICING));
                     }
-                    logger.tell(new LoggingActor.LogEnvelope("pricing.done", "ms=" + sp.ms()));
+
+                    logger.tell(new LoggingActor.LogEnvelope("pricing.done", "parsed provider=" + provider
+                            + " service=" + service + " region=" + region + " sku=" + sku + " ms=" + sp.ms()));
                 });
                 break;
             }

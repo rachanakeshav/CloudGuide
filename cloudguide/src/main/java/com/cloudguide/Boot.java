@@ -118,7 +118,7 @@ public class Boot {
 
                 // HTTP server
                 new HttpServer()
-                        .start(ctx.getSystem(), router, httpPort)
+                        .start(ctx.getSystem(), router, ingestor, httpPort)
                         .whenComplete((b, e) -> {
                             if (e != null) {
                                 ctx.getLog().error("HTTP bind failed", e);
@@ -153,11 +153,11 @@ public class Boot {
 //                        ),
 //                        ctx.getExecutionContext()
 //                );
-//                ctx.getSystem().scheduler().scheduleOnce(
-//                        java.time.Duration.ofSeconds(2),
-//                        () -> router.tell(new RoutingActor.UserQuery("u-forward-demo-1", "hello", sink)),
-//                        ctx.getExecutionContext()
-//                );
+               ctx.getSystem().scheduler().scheduleOnce(
+                       java.time.Duration.ofSeconds(2),
+                       () -> router.tell(new RoutingActor.UserQuery("u-forward-demo-1", "hello", sink)),
+                       ctx.getExecutionContext()
+               );
             }
 
             return Behaviors.empty();
